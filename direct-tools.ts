@@ -1,6 +1,6 @@
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
-import type { DirectToolSpec, McpConfig, McpContent } from "./types.ts";
+import type { DirectToolSpec, McpConfig, McpContent, ToolVisibility } from "./types.ts";
 import type { MetadataCache } from "./metadata-cache.ts";
 import { lazyConnect, getFailureAgeSeconds } from "./init.ts";
 import { isServerCacheValid } from "./metadata-cache.ts";
@@ -33,6 +33,80 @@ function getDirectAuthFailedMessage(state: McpExtensionState, serverName: string
     return `OAuth authentication failed for "${serverName}": ${message}. ${getDirectAuthRequiredMessage(state, serverName)}`;
   }
   return `OAuth authentication failed for "${serverName}": ${message}. Run /mcp-auth ${serverName} first.`;
+}
+
+/**
+ * Resolve tool visibility from config + optional env override.
+ *
+ * Priority chain (highest → lowest):
+ *   hidden > excludeTools > envOverride(MCP_DIRECT_TOOLS) > directTools(per-server)
+ *     > directTools(global settings) > proxy(default).
+ *
+ * Hidden always wins — including over MCP_DIRECT_TOOLS env (security boundary).
+ */
+export function getToolVisibility(
+  state: McpExtensionState,
+  serverName: string,
+  originalName: string,
+  envOverride?: string[],
+): ToolVisibility {
+  const definition = state.config.mcpServers[serverName];
+  if (!definition) return "proxy"; // fallback for unconfigured servers
+
+  // Layer 1: Hidden takes absolute priority (security boundary)
+  if (Array.isArray(definition.hiddenTools) && definition.hiddenTools.includes(originalName)) {
+    return "hidden";
+  }
+
+  // Layer 2: Excluded tools are never visible through proxy
+  const prefix = state.config.settings?.toolPrefix ?? "server";
+  if (isToolExcluded(originalName, serverName, prefix, definition.excludeTools)) {
+    return "hidden";
+  }
+
+  // Layer 3: Resolve direct-tools filter chain
+  let toolFilter: true | string[] | false = false;
+
+  if (envOverride) {
+    const envServers = new Set<string>();
+    const envTools = new Map<string, Set<string>>();
+    for (let item of envOverride) {
+      item = item.replace(/\/+$/, "");
+      if (item.includes("/")) {
+        const [server, tool] = item.split("/", 2);
+        if (server && tool) {
+          if (!envTools.has(server)) envTools.set(server, new Set());
+          envTools.get(server)!.add(tool);
+        } else if (server) {
+          envServers.add(server);
+        }
+      } else if (item) {
+        envServers.add(item);
+      }
+    }
+
+    if (envServers.has(serverName)) {
+      toolFilter = true;
+    } else if (envTools.has(serverName)) {
+      const tools = envTools.get(serverName)!;
+      if (tools.has(originalName)) {
+        toolFilter = [originalName];
+      }
+    }
+  } else {
+    // No env override — use config directly
+    if (definition.directTools !== undefined) {
+      toolFilter = definition.directTools;
+    } else if (state.config.settings?.directTools) {
+      toolFilter = state.config.settings.directTools;
+    }
+  }
+
+  if (toolFilter === true) return "direct";
+  if (Array.isArray(toolFilter) && toolFilter.includes(originalName)) return "direct";
+
+  // Layer 4: Default — proxy visibility
+  return "proxy";
 }
 
 async function attemptDirectAutoAuth(
