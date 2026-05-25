@@ -313,6 +313,8 @@ export interface ServerEntry {
   directTools?: boolean | string[];
   // Exclude specific MCP tools/resources by original or prefixed name
   excludeTools?: string[];
+  /** Tools explicitly hidden from both direct registration and proxy discovery. Takes priority over directTools. */
+  hiddenTools?: string[];
   // Debug
   debug?: boolean;  // Show server stderr (default: false)
 }
@@ -344,6 +346,9 @@ export interface McpConfig {
 // Alias for clarity
 export type ServerDefinition = ServerEntry;
 
+/** Visibility states for MCP tools in the three-state model. */
+export type ToolVisibility = "direct" | "proxy" | "hidden";
+
 export interface ToolMetadata {
   name: string;           // Prefixed tool name (e.g., "xcodebuild_list_sims")
   originalName: string;   // Original MCP tool name (e.g., "list_sims")
@@ -352,6 +357,8 @@ export interface ToolMetadata {
   uiResourceUri?: string; // For app-enabled tools: the UI resource URI
   inputSchema?: unknown;  // JSON Schema for parameters (stored for describe/errors)
   uiStreamMode?: UiStreamMode;
+  /** Computed at resolution time from config + env overrides. Not persisted to cache. */
+  visibility?: ToolVisibility;
 }
 
 export interface DirectToolSpec {
