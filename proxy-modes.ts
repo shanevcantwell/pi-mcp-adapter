@@ -9,6 +9,7 @@ import { transformMcpContent } from "./tool-registrar.ts";
 import { maybeStartUiSession, type UiSessionRuntime } from "./ui-session.ts";
 import { formatAuthRequiredMessage, truncateAtWord } from "./utils.ts";
 import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
+import { getToolVisibility } from "./direct-tools.ts";
 
 type ProxyToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -231,6 +232,21 @@ export function executeDescribe(state: McpExtensionState, toolName: string): Pro
     };
   }
 
+  // Visibility check — only PROXY tools are visible through proxy layer
+  const vis = getToolVisibility(state, serverName, toolMeta.originalName);
+  if (vis === "hidden") {
+    return {
+      content: [{ type: "text" as const, text: `Tool "${toolName}" not found. Use mcp({ search: "..." }) to search.` }],
+      details: { mode: "describe", error: "tool_not_found", requestedTool: toolName },
+    };
+  }
+  if (vis === "direct") {
+    return {
+      content: [{ type: "text" as const, text: `"${toolMeta.name}" is a direct tool. Call ${toolMeta.name} directly instead of using mcp({ describe: "${toolName}" }).` }],
+      details: { mode: "describe", error: "direct_tool", requestedTool: toolName, server: serverName },
+    };
+  }
+
   let text = `${toolMeta.name}\n`;
   text += `Server: ${serverName}\n`;
   if (toolMeta.resourceUri) {
@@ -311,6 +327,11 @@ export function executeSearch(
   for (const [serverName, metadata] of state.toolMetadata.entries()) {
     if (server && serverName !== server) continue;
     for (const tool of metadata) {
+      // Only PROXY-visibility tools should appear in search results
+      const vis = getToolVisibility(state, serverName, tool.originalName);
+      if (vis === "hidden") continue; // same as nonexistent — don't leak existence
+      if (vis === "direct") continue; // call directly instead
+      if (vis !== "proxy") continue;
       if (pattern.test(tool.name) || pattern.test(tool.description)) {
         matches.push({
           server: serverName,
@@ -373,8 +394,18 @@ export function executeList(state: McpExtensionState, server: string): ProxyTool
   }
 
   const metadata = state.toolMetadata.get(server);
-  const toolNames = metadata?.map(m => m.name) ?? [];
+  // Only PROXY-visibility tools are visible through the proxy layer
+  const proxyTools = metadata?.filter(m => getToolVisibility(state, server, m.originalName) === "proxy") ?? [];
+  const toolNames = proxyTools.map(m => m.name);
   const connection = state.manager.getConnection(server);
+
+  if (toolNames.length === 0 && metadata && metadata.length > 0) {
+    // Server has tools but none are visible in proxy mode
+    return {
+      content: [{ type: "text" as const, text: `Server "${server}" has no tools available through proxy. All tools may be registered directly or hidden.` }],
+      details: { mode: "list", server, tools: [], count: 0 },
+    };
+  }
 
   if (toolNames.length === 0) {
     if (connection?.status === "connected") {
@@ -593,6 +624,23 @@ export async function executeCall(
         serverName = configuredServer;
         break;
       }
+    }
+  }
+
+  // Visibility check — only PROXY tools are callable through proxy layer
+  if (toolMeta && serverName) {
+    const vis = getToolVisibility(state, serverName, toolMeta.originalName);
+    if (vis === "hidden") {
+      return {
+        content: [{ type: "text" as const, text: `Tool "${toolName}" not found. Use mcp({ search: "..." }) to search.` }],
+        details: { mode: "call", error: "tool_not_found", requestedTool: toolName },
+      };
+    }
+    if (vis === "direct") {
+      return {
+        content: [{ type: "text" as const, text: `"${toolMeta.name}" is a direct tool. Call ${toolMeta.name} directly instead of using mcp({ tool: "${toolName}" }).` }],
+        details: { mode: "call", error: "direct_tool", requestedTool: toolName, server: serverName },
+      };
     }
   }
 
