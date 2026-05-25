@@ -21,9 +21,31 @@ import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
 import { openUrl, parallelLimit } from "./utils.ts";
 import { logger } from "./logger.ts";
-import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
+import { getMissingConfiguredDirectToolServers, getToolVisibility } from "./direct-tools.ts";
 
 const FAILURE_BACKOFF_MS = 60 * 1000;
+
+/**
+ * Validate visibility config at startup — warns on directTools + hiddenTools overlap.
+ * Called once after config load, before server connections begin.
+ */
+function validateVisibilityConfig(config: import("./types.ts").McpConfig): void {
+  for (const [serverName, definition] of Object.entries(config.mcpServers)) {
+    const directSet = new Set<string>();
+
+    if (Array.isArray(definition.directTools)) {
+      for (const name of definition.directTools) directSet.add(name);
+    }
+    // Skip static check when directTools === true (don't know tool list yet)
+
+    const hiddenSet = new Set(definition.hiddenTools ?? []);
+    for (const name of directSet) {
+      if (hiddenSet.has(name)) {
+        console.warn(`MCP: "${serverName}/${name}" is in both directTools and hiddenTools — will be treated as HIDDEN`);
+      }
+    }
+  }
+}
 
 export async function initializeMcp(
   pi: ExtensionAPI,
@@ -31,6 +53,8 @@ export async function initializeMcp(
 ): Promise<McpExtensionState> {
   const configPath = pi.getFlag("mcp-config") as string | undefined;
   const config = loadMcpConfig(configPath, ctx.cwd);
+
+  validateVisibilityConfig(config); // Warn on directTools + hiddenTools overlap
 
   const manager = new McpServerManager();
   const samplingAutoApprove = config.settings?.samplingAutoApprove === true;
